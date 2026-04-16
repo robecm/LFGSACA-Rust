@@ -1,16 +1,14 @@
 use crate::utils::{is_marked, mark, unmark, UMASK};
 
 pub fn phase2(sa: &mut [u32], mut gstarts: Vec<u32>, isa_prev: &[u32], n: usize) {
-    println!("[INFO] Executing Phase II...");
     let undef = UMASK;
     for i in 0..n { sa[i] = undef; }
 
-    // LA PIEZA FALTANTE DE C++:
-    // Pre-poblamos todas las "Anclas" (Singletons) antes de la inducción.
+    // Pre-poblamos las anclas con su marca MSB vital
     for i in 0..n {
         let isa = isa_prev[2 * i];
         if is_marked(isa) {
-            sa[unmark(isa) as usize] = i as u32;
+            sa[unmark(isa) as usize] = mark(i as u32);
         }
     }
 
@@ -18,7 +16,8 @@ pub fn phase2(sa: &mut [u32], mut gstarts: Vec<u32>, isa_prev: &[u32], n: usize)
         loop {
             let isa = isa_prev[2 * curr];
 
-            // Si llegamos a un ancla, la rama del DFS termina aquí.
+            // FIX: El ancla ya está colocada y marcada arriba.
+            // ¡Solo debemos romper el ciclo sin sobrescribirla!
             if is_marked(isa) { break; }
 
             let p = isa_prev[2 * curr + 1];
@@ -43,6 +42,7 @@ pub fn phase2(sa: &mut [u32], mut gstarts: Vec<u32>, isa_prev: &[u32], n: usize)
         let sv = sa[i];
         if sv != undef && is_marked(sv) {
             sa[i] = unmark(sv);
+            // Al no haber borrado la marca del 10, walk(9) por fin se ejecutará aquí.
             if sa[i] > 0 { walk(sa[i] as usize - 1, sa, &mut gstarts); }
         }
     }

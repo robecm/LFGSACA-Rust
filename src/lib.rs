@@ -3,6 +3,7 @@ pub mod pss;
 pub mod phase1;
 pub mod phase2;
 
+use crate::utils::{is_marked, unmark};
 use crate::pss::{compute_ls_types, compute_pss};
 use crate::phase1::{build_c, insert_leaves, phase1, write_group_sizes};
 use crate::phase2::phase2;
@@ -10,6 +11,9 @@ use crate::phase2::phase2;
 pub fn fgsaca(text: &[u8]) -> Vec<u32> {
     let n = text.len();
     if n == 0 { return Vec::new(); }
+
+    let debug = n < 20; // Solo imprime en pruebas cortas
+    if debug { println!("\n[DEBUG] --- STARTING FGSACA FOR: {:?} ---", String::from_utf8_lossy(text)); }
 
     let mut pss = compute_pss(text, n);
     let types = compute_ls_types(text, n);
@@ -22,6 +26,16 @@ pub fn fgsaca(text: &[u8]) -> Vec<u32> {
     insert_leaves(text, n, &mut sa, &mut isa, &c);
 
     let gstarts = phase1(&mut sa, &pss, &mut isa, n);
+
+    if debug {
+        println!("[DEBUG] --- HANDOFF TO PHASE 2 ---");
+        println!("[DEBUG] SA Array : {:?}", sa);
+
+        // Imprime el ISA poniendo un asterisco '*' si tiene la marca MSB encendida
+        let isa_str: Vec<String> = isa.iter().map(|&x| if is_marked(x) { format!("*{}", unmark(x)) } else { unmark(x).to_string() }).collect();
+        println!("[DEBUG] ISA Array: {:?}", isa_str);
+        println!("[DEBUG] GSTARTS  : {:?}", gstarts);
+    }
 
     let mut isa_prev = vec![0; 2 * n];
     for i in 0..n {
