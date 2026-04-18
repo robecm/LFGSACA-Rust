@@ -15,14 +15,17 @@ pub fn compute_ls_types(s: &[u8], n: usize) -> Vec<u8> {
     types
 }
 
-pub fn compute_pss(text: &[u8], n: usize) -> Vec<u32> {
-    let mut pss = vec![n as u32; n];
-    let mut stack: Vec<u32> = Vec::with_capacity(n);
+pub fn compute_pss(text: &[u8], n: usize) -> Vec<usize> {
+    let mut pss = vec![n as usize; n];
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
     let update_interval = (n / 10).max(1);
 
     for i in 0..n {
         if i % update_interval == 0 {
-            print!("\r[INFO] PSS Computation: {}%  ", ((i as f64 / n as f64) * 100.0) as u32);
+            print!(
+                "\r[INFO] PSS Computation: {}%  ",
+                ((i as f64 / n as f64) * 100.0) as usize
+            );
             io::stdout().flush().unwrap();
         }
 
@@ -34,26 +37,42 @@ pub fn compute_pss(text: &[u8], n: usize) -> Vec<u32> {
 
             let mut lcp = 0;
             while lcp < mn {
-                if text[j + lcp] != text[i + lcp] { break; }
+                if text[j + lcp] != text[i + lcp] {
+                    break;
+                }
                 lcp += 1;
             }
-            let less = if lcp < mn { text[j + lcp] < text[i + lcp] } else { lj < li };
+            let less = if lcp < mn {
+                text[j + lcp] < text[i + lcp]
+            } else {
+                lj < li
+            };
 
-            if less { break; }
+            if less {
+                break;
+            }
             stack.pop();
         }
-        pss[i] = if let Some(&j) = stack.last() { j } else { n as u32 };
-        stack.push(i as u32);
+        pss[i] = if let Some(&j) = stack.last() {
+            j
+        } else {
+            n as usize
+        };
+        stack.push(i as usize);
     }
 
-    let mut last_child = vec![n as u32; n];
+    let mut last_child = vec![n as usize; n];
     for i in 0..n {
         let p = pss[i];
-        if p != n as u32 { last_child[p as usize] = i as u32; }
+        if p != n as usize {
+            last_child[p as usize] = i as usize;
+        }
     }
     for parent in 0..n {
         let child = last_child[parent];
-        if child != n as u32 { pss[child as usize] = mark(pss[child as usize]); }
+        if child != n as usize {
+            pss[child as usize] = mark(pss[child as usize]);
+        }
     }
 
     println!("\r[INFO] PSS Computation: 100%      ");

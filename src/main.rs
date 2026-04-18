@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::Instant;
 
@@ -19,25 +20,27 @@ fn main() {
                 if path.is_file() {
                     let file_size = fs::metadata(&path).unwrap().len();
 
-                    if file_size > 300_000_000 {
-                        println!(
-                            "\n[WARN] Skipping '{}' ({} bytes) - File exceeds 300MB memory safety limit.",
-                            path.file_name().unwrap().to_string_lossy(),
-                            file_size
-                        );
-                        continue;
-                    }
-
                     println!("\n[INFO] Processing: {}", path.display());
-                    if let Ok(content) = fs::read(&path) {
-                        let n = content.len();
-                        println!("[INFO] Input size: {} bytes", n);
+                    if let Ok(file) = File::open(&path) {
+                        let mut reader = BufReader::new(file);
+                        let mut content = Vec::with_capacity(file_size as usize);
+                        if let Ok(_) = reader.read_to_end(&mut content) {
+                            let n = content.len();
+                            println!("[INFO] Input size: {} bytes", n);
 
-                        let start = Instant::now();
-                        let _sa = fgsaca(&content);
-                        let duration = start.elapsed();
+                            let start = Instant::now();
+                            let _sa = fgsaca(&content);
+                            let duration = start.elapsed();
 
-                        println!("[SUCCESS] Execution time: {:.4} seconds", duration.as_secs_f64());
+                            println!(
+                                "[SUCCESS] Execution time: {:.4} seconds",
+                                duration.as_secs_f64()
+                            );
+                        } else {
+                            println!("[ERROR] Failed to read file {}", path.display());
+                        }
+                    } else {
+                        println!("[ERROR] Failed to open file {}", path.display());
                     }
                 }
             }
