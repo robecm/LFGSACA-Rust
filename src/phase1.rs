@@ -1,6 +1,18 @@
 use crate::utils::{is_marked, mark, unmark, MSB, UMASK};
 use std::io::{self, Write};
 
+macro_rules! assert_index {
+    ($idx:expr, $len:expr, $label:expr) => {
+        if $idx >= $len {
+            eprintln!("\n[FATAL ERROR] Memory bounds violation in Phase 1.");
+            eprintln!(" -> Location: {}", $label);
+            eprintln!(" -> Calculated Index: {}", $idx);
+            eprintln!(" -> Max Permitted Length: {}", $len);
+            std::process::exit(1);
+        }
+    };
+}
+
 pub fn build_c(s: &[u8], n: usize, sigma: usize, types: &[u8]) -> Vec<u32> {
     let mut c = vec![0; 2 * sigma + 2];
     for i in 0..n { c[2 * (s[i] as usize) + (types[i] as usize)] += 1; }
@@ -56,25 +68,33 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
         if !is_marked(sv) { gend -= 1; continue; }
 
         let s_val = unmark(sv) as usize;
+        let gstart_raw = isa[s_val];
 
-        // FIX: Evitar el desbordamiento de memoria limpiando el bit antes de usarlo como índice
-        let gstart_orig = unmark(isa[s_val]) as usize;
-        let mut num = (gend as usize) + 1 - gstart_orig;
+        if is_marked(gstart_raw) { gend -= 1; continue; }
+
+        let gstart = gstart_raw as usize;
+        let mut num = (gend as usize) + 1 - gstart;
 
         if num == 1 {
-            isa[s_val] = mark(gstart_orig as u32);
+            isa[s_val] = mark(gstart as u32);
             let p_raw = pss[s_val];
             let p = unmark(p_raw) as usize;
             if p < n {
-                let gs = isa[p] as usize;
-                if !is_marked(isa[p]) {
+                let gs_raw = isa[p];
+                if !is_marked(gs_raw) {
+                    let gs = gs_raw as usize;
                     if sa[gs] == 1 && is_marked(p_raw) {
                         sa[gs] = mark(p as u32);
+                        isa[p] = mark(gs as u32);
                     } else if sa[gs] != 1 {
-                        sa[gs] = sa[gs].wrapping_sub(1);
-                        let pos = (gs as u32).wrapping_add(sa[gs]) as usize;
-                        sa[pos] = if is_marked(p_raw) { mark(p as u32) } else { 1 };
-                        isa[p] = pos as u32;
+                        let new_sa_gs = sa[gs].wrapping_sub(1);
+                        sa[gs] = new_sa_gs;
+
+                        let pos = (gs as u32).wrapping_add(new_sa_gs) as usize;
+                        assert_index!(pos, n, "if num == 1 -> sa[pos] assignment");
+
+                        sa[pos] = if is_marked(p_raw) { mark(p as u32) } else { p as u32 };
+                        isa[p] = if is_marked(sa[gs]) { pos as u32 } else { mark(pos as u32) };
                     }
                 }
             }
@@ -82,36 +102,35 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
             continue;
         }
 
-        gstarts.push(gstart_orig as u32);
-
-        // FIX: Preservar el 9 y el 2 (Raíces de Lyndon) en su lugar original
+        gstarts.push(gstart as u32);
         let mut num_factors = 0;
+
         while num_factors < num {
-            let item = unmark(sa[gstart_orig + num_factors]) as usize;
+            let item = unmark(sa[gstart + num_factors]) as usize;
             if unmark(pss[item]) == n as u32 {
-                isa[item] = mark((gstart_orig + num_factors) as u32);
+                isa[item] = mark((gstart + num - 1 - num_factors) as u32);
                 num_factors += 1;
-            } else {
-                break;
+            } else { break; }
+        }
+
+        if num_factors > 0 {
+            for i in num_factors..num {
+                let item = unmark(sa[gstart + i]);
+                sa[gstart + i - num_factors] = if is_marked(pss[item as usize]) { mark(item) } else { item };
+            }
+            num -= num_factors;
+            gend -= num_factors as isize;
+            if num == 0 { gend = (gstart as isize) - 1; continue; }
+        } else {
+            for i in 0..num {
+                let item = unmark(sa[gstart + i]);
+                sa[gstart + i] = if is_marked(pss[item as usize]) { mark(item) } else { item };
             }
         }
 
-        let current_gstart = gstart_orig + num_factors;
-        num -= num_factors;
-
-        if num == 0 {
-            gend = (gstart_orig as isize) - 1;
-            continue;
-        }
-
-        for i in 0..num {
-            let item = unmark(sa[current_gstart + i]) as usize;
-            sa[current_gstart + i] = pss[item] & (UMASK | MSB);
-        }
-
         let mut elements = vec![0; num];
-        for i in 0..num { elements[i] = sa[current_gstart + i]; }
-        elements.sort_unstable_by_key(|&x| unmark(x));
+        for i in 0..num { elements[i] = sa[gstart + i]; }
+        elements.sort_unstable_by_key(|&x| unmark(pss[unmark(x) as usize]));
 
         let mut singles_lc = Vec::new();
         let mut singles_nlc = Vec::new();
@@ -120,10 +139,10 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
 
         while i < num {
             let val = elements[i];
-            let p = unmark(val);
+            let p = unmark(pss[unmark(val) as usize]);
             let mut cnt = 0;
             let mut is_lc = false;
-            while i + cnt < num && unmark(elements[i + cnt]) == p {
+            while i + cnt < num && unmark(pss[unmark(elements[i + cnt]) as usize]) == p {
                 if is_marked(elements[i + cnt]) { is_lc = true; }
                 cnt += 1;
             }
@@ -140,9 +159,9 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
         non_singles.sort_unstable_by_key(|x| x.1);
 
         let mut idx = 0;
-        for &val in &singles_lc { sa[current_gstart + idx] = val; idx += 1; }
-        for &val in &singles_nlc { sa[current_gstart + idx] = val; idx += 1; }
-        for &(val, _) in &non_singles { sa[current_gstart + idx] = val; idx += 1; }
+        for &val in &singles_lc { sa[gstart + idx] = val; idx += 1; }
+        for &val in &singles_nlc { sa[gstart + idx] = val; idx += 1; }
+        for &(val, _) in &non_singles { sa[gstart + idx] = val; idx += 1; }
 
         let mut buckets = Vec::new();
         let mut cur = 0;
@@ -166,26 +185,32 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
 
         for &(key, bs, bend) in &buckets {
             let is_final = key % 2 == 0;
+
             if is_final {
                 for i in bs..bend {
-                    let s = unmark(sa[current_gstart + i]) as usize;
+                    let s = unmark(sa[gstart + i]) as usize;
                     let p_raw = isa[s];
 
                     if is_marked(p_raw) {
                         let pos = unmark(p_raw) as usize;
+                        assert_index!(pos, n, "is_final marked -> sa[pos]");
                         sa[pos] = mark(s as u32);
                         isa[s] = pos as u32;
                     } else {
                         let p = p_raw as usize;
-                        sa[p] = sa[p].wrapping_sub(1);
-                        let pos = (p as u32).wrapping_add(sa[p]) as usize;
+                        let new_sa_p = sa[p].wrapping_sub(1);
+                        sa[p] = new_sa_p;
+
+                        let pos = (p as u32).wrapping_add(new_sa_p) as usize;
+                        assert_index!(pos, n, "is_final unmarked -> sa[pos]");
+
                         sa[pos] = mark(s as u32);
-                        isa[s] = if is_marked(sa[p]) { p as u32 } else { pos as u32 };
+                        isa[s] = if is_marked(sa[p]) { pos as u32 } else { mark(pos as u32) };
                     }
                 }
             } else {
                 for i in bs..bend {
-                    let s = unmark(sa[current_gstart + i]) as usize;
+                    let s = unmark(sa[gstart + i]) as usize;
                     let p_raw = isa[s];
                     if !is_marked(p_raw) {
                         let p = p_raw as usize;
@@ -193,25 +218,26 @@ pub fn phase1(sa: &mut [u32], pss: &[u32], isa: &mut [u32], n: usize) -> Vec<u32
                     }
                 }
                 for i in bs..bend {
-                    let s = unmark(sa[current_gstart + i]) as usize;
+                    let s = unmark(sa[gstart + i]) as usize;
                     let p_raw = isa[s];
                     let new_start = if is_marked(p_raw) {
                         unmark(p_raw) as usize
                     } else {
-                        p_raw.wrapping_add(sa[p_raw as usize]) as usize
+                        let p = p_raw as usize;
+                        (p as u32).wrapping_add(sa[p]) as usize
                     };
+                    assert_index!(new_start, n, "!is_final -> sa[new_start]");
                     isa[s] = new_start as u32;
                     sa[new_start] = 0;
                 }
                 for i in bs..bend {
-                    let s = unmark(sa[current_gstart + i]) as usize;
+                    let s = unmark(sa[gstart + i]) as usize;
                     let p_raw = isa[s] as usize;
-                    sa[p_raw] += 1;
+                    sa[p_raw] = sa[p_raw].wrapping_add(1);
                 }
             }
         }
-        // Saltamos de forma segura el bloque procesado y respetamos a las raíces.
-        gend = (gstart_orig as isize) - 1;
+        gend = (gstart as isize) - 1;
     }
 
     for (i, &gs) in gstarts.iter().enumerate() { sa[gs as usize] = i as u32; }
