@@ -59,6 +59,10 @@ pub fn fgsaca(text: &[u8]) -> Vec<usize> {
         isa_prev[2 * i + 1] = if i == 0 { 0 } else { pss[i] };
     }
 
+    drop(isa);
+    drop(pss);
+    drop(types);
+
     phase2(&mut sa, gstarts, &isa_prev, n);
     sa
 }
