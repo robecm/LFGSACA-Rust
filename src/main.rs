@@ -9,7 +9,7 @@ use LFGSACA::fgsaca;
 fn main() {
     println!("--- FGSACA Algorithm: Modular Rust Implementation Benchmark ---");
 
-    let folder_path = "D:/1. PC-Real";
+    let folder_path = "/home/roberto_carranzam08/datos_pia";;
 
     if Path::new(folder_path).exists() {
         println!("[INFO] Starting benchmark sequence in: {}", folder_path);
