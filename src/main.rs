@@ -1,55 +1,42 @@
+use std::env;
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::Instant;
-
-// Importamos la función desde la raíz de nuestro paquete (librería)
 use LFGSACA::fgsaca;
 
 fn main() {
-    println!("--- FGSACA Algorithm: Modular Rust Implementation Benchmark ---");
+    let args: Vec<String> = env::args().collect();
 
-    let folder_path = "/home/roberto_carranzam08/datos_pia";;
+    // Si el script de Bash nos pasa una ruta por argumento
+    if args.len() > 1 {
+        let file_path = &args[1];
+        process_single_file(file_path);
+    } else {
+        println!("[ERROR] Uso: ./programa <ruta_archivo>");
+        println!("[INFO] Ejecutando test rápido...");
+        let sa = fgsaca(b"abracadabra");
+        println!("[SUCCESS] Test output: {:?}", sa);
+    }
+}
 
-    if Path::new(folder_path).exists() {
-        println!("[INFO] Starting benchmark sequence in: {}", folder_path);
+fn process_single_file(file_path: &str) {
+    let path = Path::new(file_path);
+    if let Ok(metadata) = fs::metadata(path) {
+        let file_size = metadata.len();
+        println!("[INFO] Procesando: {} ({} bytes)", path.display(), file_size);
 
-        if let Ok(entries) = fs::read_dir(folder_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let file_size = fs::metadata(&path).unwrap().len();
-
-                    println!("\n[INFO] Processing: {}", path.display());
-                    if let Ok(file) = File::open(&path) {
-                        let mut reader = BufReader::new(file);
-                        let mut content = Vec::with_capacity(file_size as usize);
-                        if let Ok(_) = reader.read_to_end(&mut content) {
-                            let n = content.len();
-                            println!("[INFO] Input size: {} bytes", n);
-
-                            let start = Instant::now();
-                            let _sa = fgsaca(&content);
-                            let duration = start.elapsed();
-
-                            println!(
-                                "[SUCCESS] Execution time: {:.4} seconds",
-                                duration.as_secs_f64()
-                            );
-                        } else {
-                            println!("[ERROR] Failed to read file {}", path.display());
-                        }
-                    } else {
-                        println!("[ERROR] Failed to open file {}", path.display());
-                    }
-                }
+        if let Ok(file) = File::open(path) {
+            let mut reader = BufReader::new(file);
+            let mut content = Vec::with_capacity(file_size as usize);
+            if let Ok(_) = reader.read_to_end(&mut content) {
+                let start = Instant::now();
+                let _sa = fgsaca(&content);
+                let duration = start.elapsed();
+                println!("[SUCCESS] Tiempo: {:.4} segundos", duration.as_secs_f64());
             }
         }
     } else {
-        println!("[ERROR] Directory not found. Executing verification test...");
-        let text = b"abracadabra";
-        let sa = fgsaca(text);
-        println!("[INFO] Target: abracadabra");
-        println!("[SUCCESS] Suffix Array Output: {:?}", sa);
+        println!("[ERROR] No se pudo acceder al archivo: {}", file_path);
     }
 }
