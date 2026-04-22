@@ -162,9 +162,22 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
         non_singles.sort_unstable_by_key(|x| x.1);
 
         let mut idx = 0;
-        for &val in &singles_lc { sa[gstart + idx] = val; idx += 1; }
-        for &val in &singles_nlc { sa[gstart + idx] = val; idx += 1; }
-        for &(val, _) in &non_singles { sa[gstart + idx] = val; idx += 1; }
+
+        for &val in &singles_lc {
+            let uval = unmark(val);
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            idx += 1;
+        }
+        for &val in &singles_nlc {
+            let uval = unmark(val);
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            idx += 1;
+        }
+        for &(val, _) in &non_singles {
+            let uval = unmark(val);
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            idx += 1;
+        }
 
         let mut buckets = Vec::new();
         let mut cur = 0;
