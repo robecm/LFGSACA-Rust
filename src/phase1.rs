@@ -163,19 +163,20 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
         let mut idx = 0;
 
+        // LA LÓGICA PURA DEL PAPER: Asignar el hijo (uval) con su marca correspondiente
         for &val in &singles_lc {
             let uval = unmark(val);
-            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { uval };
             idx += 1;
         }
         for &val in &singles_nlc {
             let uval = unmark(val);
-            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { uval };
             idx += 1;
         }
         for &(val, _) in &non_singles {
             let uval = unmark(val);
-            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { unmark(pss[uval]) };
+            sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { uval };
             idx += 1;
         }
 
