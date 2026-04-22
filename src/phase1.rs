@@ -92,8 +92,12 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
                         let pos = gs.wrapping_add(new_sa_gs);
                         sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
-                        isa[p] = if is_marked(sa[gs]) { pos } else { mark(pos) };
+                        isa[p] = mark(pos);
                     }
+                } else {
+                    let pos = unmark(gs_raw);
+                    sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
+                    isa[p] = mark(pos);
                 }
             }
             gend -= 1;
