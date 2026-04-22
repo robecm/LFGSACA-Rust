@@ -4,25 +4,20 @@ pub mod pss;
 pub mod utils;
 
 use crate::phase1::{build_c, insert_leaves, phase1, write_group_sizes};
-use crate::phase2::phase2;
-use crate::pss::{compute_ls_types, compute_pss};
-use crate::utils::{is_marked, unmark};
+use crate::phase2::{phase2, phase2_circular};
+use crate::pss::{compute_ls_types, compute_pss, compute_lpss};
 
-pub fn fgsaca(text: &[u8]) -> Vec<usize> {
+pub enum FgsacaMode { SuffixArray, BBWT, EBWT }
+
+pub fn fgsaca(text: &[u8], mode: FgsacaMode) -> Vec<usize> {
     let n = text.len();
-    if n == 0 {
-        return Vec::new();
-    }
+    if n == 0 { return Vec::new(); }
 
-    let debug = n < 20; // Solo imprime en pruebas cortas
-    if debug {
-        println!(
-            "\n[DEBUG] --- STARTING FGSACA FOR: {:?} ---",
-            String::from_utf8_lossy(text)
-        );
-    }
+    let pss = match mode {
+        FgsacaMode::EBWT => compute_lpss(text, n),
+        _ => compute_pss(text, n),
+    };
 
-    let mut pss = compute_pss(text, n);
     let types = compute_ls_types(text, n);
     let c = build_c(text, n, 256, &types);
 
@@ -34,25 +29,6 @@ pub fn fgsaca(text: &[u8]) -> Vec<usize> {
 
     let gstarts = phase1(&mut sa, &pss, &mut isa, n);
 
-    if debug {
-        println!("[DEBUG] --- HANDOFF TO PHASE 2 ---");
-        println!("[DEBUG] SA Array : {:?}", sa);
-
-        // Imprime el ISA poniendo un asterisco '*' si tiene la marca MSB encendida
-        let isa_str: Vec<String> = isa
-            .iter()
-            .map(|&x| {
-                if is_marked(x) {
-                    format!("*{}", unmark(x))
-                } else {
-                    unmark(x).to_string()
-                }
-            })
-            .collect();
-        println!("[DEBUG] ISA Array: {:?}", isa_str);
-        println!("[DEBUG] GSTARTS  : {:?}", gstarts);
-    }
-
     let mut isa_prev = vec![0; 2 * n];
     for i in 0..n {
         isa_prev[2 * i] = isa[i];
@@ -63,6 +39,10 @@ pub fn fgsaca(text: &[u8]) -> Vec<usize> {
     drop(pss);
     drop(types);
 
-    phase2(&mut sa, gstarts, &isa_prev, n);
+    match mode {
+        FgsacaMode::SuffixArray => phase2(&mut sa, gstarts, &isa_prev, n),
+        _ => phase2_circular(&mut sa, gstarts, &isa_prev, n),
+    }
+
     sa
 }

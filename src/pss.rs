@@ -16,65 +16,75 @@ pub fn compute_ls_types(s: &[u8], n: usize) -> Vec<u8> {
 }
 
 pub fn compute_pss(text: &[u8], n: usize) -> Vec<usize> {
-    let mut pss = vec![n as usize; n];
+    let mut pss = vec![n; n];
     let mut stack: Vec<usize> = Vec::with_capacity(n);
-    let update_interval = (n / 10).max(1);
+    let update_interval = (n / 100).max(1);
 
     for i in 0..n {
         if i % update_interval == 0 {
-            print!(
-                "\r[INFO] PSS Computation: {}%  ",
-                ((i as f64 / n as f64) * 100.0) as usize
-            );
+            print!("\r[INFO] PSS Computation: {}%  ", ((i as f64 / n as f64) * 100.0) as usize);
             io::stdout().flush().unwrap();
         }
 
-        while let Some(&j_val) = stack.last() {
-            let j = j_val as usize;
-            let li = n - i;
-            let lj = n - j;
-            let mn = li.min(lj);
-
-            let mut lcp = 0;
-            while lcp < mn {
-                if text[j + lcp] != text[i + lcp] {
-                    break;
-                }
-                lcp += 1;
-            }
-            let less = if lcp < mn {
-                text[j + lcp] < text[i + lcp]
-            } else {
-                lj < li
-            };
-
-            if less {
-                break;
-            }
+        while let Some(&j) = stack.last() {
+            if compare_suffixes(text, j, i, n) { break; }
             stack.pop();
         }
-        pss[i] = if let Some(&j) = stack.last() {
-            j
-        } else {
-            n as usize
-        };
-        stack.push(i as usize);
-    }
-
-    let mut last_child = vec![n as usize; n];
-    for i in 0..n {
-        let p = pss[i];
-        if p != n as usize {
-            last_child[p as usize] = i as usize;
-        }
-    }
-    for parent in 0..n {
-        let child = last_child[parent];
-        if child != n as usize {
-            pss[child as usize] = mark(pss[child as usize]);
-        }
+        pss[i] = stack.last().cloned().unwrap_or(n);
+        stack.push(i);
     }
 
     println!("\r[INFO] PSS Computation: 100%      ");
+    mark_last_children(&mut pss, n);
     pss
+}
+
+pub fn compute_lpss(text: &[u8], n: usize) -> Vec<usize> {
+    let mut pss = vec![n; n];
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+    let update_interval = (n / 100).max(1);
+
+    for i in 0..n {
+        if i % update_interval == 0 {
+            print!("\r[INFO] LPSS Computation: {}%  ", ((i as f64 / n as f64) * 100.0) as usize);
+            io::stdout().flush().unwrap();
+        }
+
+        if text[i] == b'$' { stack.clear(); }
+
+        while let Some(&j) = stack.last() {
+            if compare_suffixes(text, j, i, n) { break; }
+            stack.pop();
+        }
+        pss[i] = stack.last().cloned().unwrap_or(n);
+        stack.push(i);
+    }
+
+    println!("\r[INFO] LPSS Computation: 100%      ");
+    mark_last_children(&mut pss, n);
+    pss
+}
+
+fn compare_suffixes(text: &[u8], j: usize, i: usize, n: usize) -> bool {
+    let len_j = n - j;
+    let len_i = n - i;
+    let common = len_j.min(len_i);
+    for k in 0..common {
+        if text[j + k] != text[i + k] {
+            return text[j + k] < text[i + k];
+        }
+    }
+    len_j < len_i
+}
+
+fn mark_last_children(pss: &mut [usize], n: usize) {
+    let mut last_child = vec![n; n];
+    for i in 0..n {
+        let p = pss[i];
+        if p != n { last_child[p] = i; }
+    }
+    for p in 0..n {
+        let c = last_child[p];
+        if c != n { pss[c] = mark(pss[c]); }
+    }
 }
