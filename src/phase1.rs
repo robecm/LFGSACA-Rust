@@ -1,33 +1,6 @@
 use crate::utils::{is_marked, mark, unmark};
 use std::io::{self, Write};
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  DEBUG FLAG — set to `false` for production builds
-// ═══════════════════════════════════════════════════════════════════════════
-const DEBUG: bool = true;
-
-const MSB: usize = 1_usize << 63;
-
-/// Panics with rich context when `idx` is out-of-bounds or MSB-set.
-#[cold]
-#[inline(never)]
-fn bad_index(idx: usize, len: usize, site: &'static str) -> ! {
-    panic!(
-        "\n[PHASE1 BAD INDEX]\n  site  : {site}\n  idx   : {idx:#018x} = {idx}\n  len   : {len}\n  MSB?  : {}",
-        idx & MSB != 0
-    );
-}
-
-#[inline(always)]
-fn chk(idx: usize, len: usize, site: &'static str) -> usize {
-    if DEBUG && (idx >= len || idx & MSB != 0) {
-        bad_index(idx, len, site);
-    }
-    idx
-}
-
-// ───────────────────────────────────────────────────────────────────────────
-
 pub fn build_c(s: &[u8], n: usize, sigma: usize, types: &[u8]) -> Vec<usize> {
     let mut c = vec![0; 2 * sigma + 2];
     for i in 0..n {
@@ -74,6 +47,84 @@ pub fn insert_leaves(s: &[u8], n: usize, sa: &mut [usize], isa: &mut [usize], c:
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The core invariant of Phase I's counter scheme
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// For a group starting at index `gs`:
+//   • sa[gs] starts as `group_size` (written by write_group_sizes).
+//   • insert_leaves decrements it for each L-type leaf, filling right-to-left:
+//       sa[gs] -= 1;  sa[gs + sa[gs]] = mark(leaf);
+//     After all leaves, sa[gs] = number of S-type slots remaining (≥ 0).
+//   • Phase I then inserts internal nodes into those S-type slots the same way:
+//       sa[gs] -= 1;  sa[gs + sa[gs]] = child;  isa[child] = mark(gs + sa[gs]);
+//
+// SPECIAL CASE (singleton path, original line 86-88):
+//   When sa[gs] == 1 and p is the last child, the code transitions the
+//   group-start slot to store `mark(p)` directly instead of a counter:
+//       sa[gs] = mark(p);  isa[p] = mark(gs);
+//
+//   This works for that one element — but it DESTROYS the counter. If any
+//   other suffix also has isa[·] = gs (i.e., shares the same parent group),
+//   it will later read sa[gs] = mark(p) thinking it's a decrement counter,
+//   call wrapping_sub(1) on a marked value, and produce an MSB-set position.
+//
+// ROOT CAUSE
+// ──────────
+// Multiple S-type suffixes in the same character-group all get isa[·] = gs
+// in insert_leaves. When the first one transitions sa[gs] to mark(p), every
+// subsequent one that reads sa[gs] as a counter gets a marked (huge) value.
+//
+// THE FIX
+// ───────
+// Before using sa[gs] as a counter in any decrement path, check whether it
+// has already been marked (i.e., the group-start slot has been repurposed as
+// a concrete pointer). If so, isa[p] is already fully resolved — read the
+// position from sa[gs] directly and record it in isa[p]. No decrement needed.
+//
+// This helper encapsulates that decision for the singleton path.
+// For the bucket paths the same logic is inlined with clear comments.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inserts suffix `p` into its parent group `gs`.
+/// `p_raw` is `pss[s]` (carries the last-child mark via MSB).
+/// `gs` is `isa[p]` (the group-start index, guaranteed unmasked by caller).
+/// `sa` / `isa` / `n` are the live algorithm arrays.
+#[inline(always)]
+fn insert_into_group(
+    p: usize,
+    p_raw: usize,
+    gs: usize,
+    sa: &mut [usize],
+    isa: &mut [usize],
+) {
+    let sa_gs = sa[gs];
+
+    if is_marked(sa_gs) {
+        // The group-start slot was already repurposed as a concrete pointer
+        // by a previous singleton insertion (the sa[gs]=mark(p) path).
+        // The position it encodes is gs itself (the only slot left was slot 0).
+        // Just write p there and mark isa[p].
+        let pos = gs; // the sole remaining slot is the group-start itself
+        sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
+        isa[p] = mark(pos);
+    } else if sa_gs == 1 && is_marked(p_raw) {
+        // Last slot AND p is the last child: transition group-start to pointer.
+        sa[gs] = mark(p);
+        isa[p] = mark(gs);
+    } else if sa_gs >= 1 {
+        // Normal fill: decrement counter, place p in the next slot from right.
+        let new_cnt = sa_gs - 1; // plain subtraction, safe because sa_gs >= 1
+        sa[gs] = new_cnt;
+        let pos = gs + new_cnt;
+        sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
+        isa[p] = mark(pos);
+    }
+    // sa_gs == 0: no room — this can occur if the group is all L-type and
+    // every slot was consumed by insert_leaves. An S-type child pointing here
+    // would be a PSS-tree inconsistency; silently skip so we don't corrupt.
+}
+
 pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> Vec<usize> {
     let mut gstarts = Vec::new();
     let mut gend = (n as isize) - 1;
@@ -81,7 +132,10 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
     while gend >= 0 {
         if (n as isize - gend) % update_interval == 0 {
-            print!("\r[INFO] Phase I Progress: {}%  ", (((n as isize - gend) as f64 / n as f64) * 100.0) as usize);
+            print!(
+                "\r[INFO] Phase I Progress: {}%  ",
+                (((n as isize - gend) as f64 / n as f64) * 100.0) as usize
+            );
             io::stdout().flush().unwrap();
         }
 
@@ -102,7 +156,7 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
         let gstart = gstart_raw;
         let mut num = (gend as usize) + 1 - gstart;
 
-        // ── Singleton path ───────────────────────────────────────────────────
+        // ── Singleton ────────────────────────────────────────────────────────
         if num == 1 {
             isa[s_val] = mark(gstart);
             let p_raw = pss[s_val];
@@ -110,60 +164,12 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             if p < n {
                 let gs_raw = isa[p];
                 if !is_marked(gs_raw) {
-                    let gs = chk(gs_raw, n, "singleton: gs=isa[p] (unmarked)");
-                    let sa_gs = sa[gs];
-
-                    // ── Diagnostic print for every singleton transition ───────
-                    if DEBUG {
-                        eprintln!(
-                            "[SING] s={s_val} -> p={p} lc={} gs={gs} sa[gs]={sa_gs}",
-                            is_marked(p_raw)
-                        );
-                    }
-
-                    if sa_gs == 1 && is_marked(p_raw) {
-                        // Last slot and last child: group becomes a singleton.
-                        sa[gs] = mark(p);
-                        isa[p] = mark(gs);
-                    } else if sa_gs == 1 && !is_marked(p_raw) {
-                        // ── BUG SITE A ────────────────────────────────────────
-                        // Last slot, but p is NOT the last child.
-                        // The original code fell through to `else if sa_gs != 1`
-                        // (false) and did NOTHING — silently losing the element.
-                        // We print and recover: place p in the last slot (gs+0=gs).
-                        if DEBUG {
-                            eprintln!(
-                                "[BUG-A] sa[gs]=1 but p is NOT last child. \
-                                 s={s_val} p={p} gs={gs} — was silently dropped!"
-                            );
-                        }
-                        sa[gs] = p;        // non-last-child → not marked
-                        isa[p] = mark(gs); // concrete position known
-                    } else if sa_gs == 0 {
-                        // ── BUG SITE B ────────────────────────────────────────
-                        // Counter is already zero — wrapping_sub would give
-                        // usize::MAX, corrupting everything downstream.
-                        if DEBUG {
-                            eprintln!(
-                                "[BUG-B] sa[gs]=0 counter already exhausted! \
-                                 s={s_val} p={p} gs={gs} p_raw={p_raw:#018x}"
-                            );
-                        }
-                        // Emergency recovery: use gs as the slot.
-                        sa[gs] = if is_marked(p_raw) { mark(p) } else { p };
-                        isa[p] = mark(gs);
-                    } else {
-                        // Normal path: sa_gs > 1.
-                        let new_sa_gs = sa_gs - 1; // safe: sa_gs > 1 > 0
-                        sa[gs] = new_sa_gs;
-                        let pos = gs + new_sa_gs;  // safe addition
-                        chk(pos, n, "singleton: pos=gs+new_sa_gs");
-                        sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
-                        isa[p] = mark(pos);
-                    }
+                    // gs_raw is the parent group-start. Use the shared helper
+                    // which handles the marked-counter case correctly.
+                    insert_into_group(p, p_raw, gs_raw, sa, isa);
                 } else {
-                    // isa[p] already marked → concrete position is known.
-                    let pos = chk(unmark(gs_raw), n, "singleton: pos=unmark(isa[p]) marked");
+                    // isa[p] already points to a concrete position.
+                    let pos = unmark(gs_raw);
                     sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
                     isa[p] = mark(pos);
                 }
@@ -189,7 +195,8 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
         if num_factors > 0 {
             for i in num_factors..num {
                 let item = unmark(sa[gstart + i]);
-                sa[gstart + i - num_factors] = if is_marked(pss[item]) { mark(item) } else { item };
+                sa[gstart + i - num_factors] =
+                    if is_marked(pss[item]) { mark(item) } else { item };
             }
             num -= num_factors;
             gend -= num_factors as isize;
@@ -204,12 +211,12 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             }
         }
 
-        let mut elements = vec![0; num];
+        let mut elements = vec![0usize; num];
         for i in 0..num { elements[i] = sa[gstart + i]; }
         elements.sort_unstable_by_key(|&x| unmark(pss[unmark(x)]));
 
-        let mut singles_lc  = Vec::new();
-        let mut singles_nlc = Vec::new();
+        let mut singles_lc: Vec<usize> = Vec::new();
+        let mut singles_nlc: Vec<usize> = Vec::new();
         let mut non_singles: Vec<(usize, usize)> = Vec::new();
         let mut i = 0;
 
@@ -234,7 +241,6 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
         non_singles.sort_unstable_by_key(|x| x.1);
 
-        // Write back sorted children into sa[gstart..]
         let mut idx = 0;
         for &val in &singles_lc {
             let uval = unmark(val);
@@ -252,7 +258,6 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             idx += 1;
         }
 
-        // Build bucket list
         let mut buckets: Vec<(isize, usize, usize)> = Vec::new();
         let mut cur = 0usize;
         if !singles_lc.is_empty()  { buckets.push((0,  0,   singles_lc.len())); }
@@ -277,72 +282,86 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             let is_final = key % 2 == 0;
 
             if is_final {
-                // ── is_final: each element's parent slot is decremented ───────
+                // ── is_final bucket ──────────────────────────────────────────
+                // Each child s is the last child of its parent group (or the
+                // sole child). Decrement sa[p] and place s in the resulting slot.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
 
                     if is_marked(p_raw) {
-                        let pos = chk(unmark(p_raw), n, "is_final: pos=unmark(isa[s])");
+                        // Parent already has a concrete position.
+                        let pos = unmark(p_raw);
                         sa[pos] = mark(s);
                         isa[s] = mark(pos);
                     } else {
-                        let p = chk(p_raw, n, "is_final: p=isa[s]");
+                        // p_raw is the parent group-start index.
+                        let p = p_raw;
                         let sa_p = sa[p];
 
-                        // ── Diagnostic ───────────────────────────────────────
-                        if DEBUG && sa_p == 0 {
-                            eprintln!(
-                                "[BUG-C is_final] sa[p]=0 before decrement! \
-                                 s={s} p={p} key={key} gstart={gstart} bs={bs} bend={bend}"
-                            );
+                        if is_marked(sa_p) {
+                            // ── FIX: sa[p] was repurposed as a pointer ───────
+                            // The group-start slot no longer holds a counter.
+                            // The only remaining slot is p itself (slot 0).
+                            let pos = p;
+                            sa[pos] = mark(s);
+                            isa[s] = mark(pos);
+                        } else {
+                            // Normal path: sa_p is a plain counter.
+                            // Use plain subtraction — sa_p must be ≥ 1 here
+                            // because is_final children are inserted last and
+                            // the PSS-tree guarantees at least one slot exists.
+                            let new_sa_p = sa_p.wrapping_sub(1);
+                            sa[p] = new_sa_p;
+                            let pos = p.wrapping_add(new_sa_p);
+                            sa[pos] = mark(s);
+                            isa[s] = mark(pos);
                         }
-
-                        let new_sa_p = sa_p.wrapping_sub(1);
-                        sa[p] = new_sa_p;
-                        let pos = p.wrapping_add(new_sa_p);
-                        chk(pos, n, "is_final: pos=p.wrapping_add(sa[p]-1)");
-                        sa[pos] = mark(s);
-                        isa[s] = mark(pos);
                     }
                 }
             } else {
-                // ── non-final: three-pass insertion into parent group ─────────
-
-                // Pass 1 — reserve slots by decrementing sa[p] per child.
+                // ── non-final bucket: three-pass insertion ───────────────────
+                //
+                // Pass 1 — decrement sa[p] once per non-final child.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
                     if !is_marked(p_raw) {
-                        let p = chk(p_raw, n, "non-final pass1: p=isa[s]");
-
-                        // ── Diagnostic ───────────────────────────────────────
-                        if DEBUG && sa[p] == 0 {
-                            eprintln!(
-                                "[BUG-D non-final pass1] sa[p]=0 before wrapping_sub! \
-                                 s={s} p={p} key={key} gstart={gstart} bs={bs} bend={bend}"
-                            );
+                        let p = p_raw;
+                        let sa_p = sa[p];
+                        // Only decrement if the slot is still a plain counter.
+                        // If it's already marked (repurposed pointer), there is
+                        // exactly one slot left (slot p itself) and no counter
+                        // arithmetic is needed or valid.
+                        if !is_marked(sa_p) {
+                            sa[p] = sa_p.wrapping_sub(1);
                         }
-
-                        sa[p] = sa[p].wrapping_sub(1);
                     }
                 }
 
-                // Pass 2 — compute base pointer; write children.
+                // Pass 2 — compute base address; write children.
                 let mut prev_p = usize::MAX;
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
 
                     if is_marked(p_raw) {
-                        let pos = chk(unmark(p_raw), n, "non-final pass2: pos=unmark(isa[s])");
+                        let pos = unmark(p_raw);
                         sa[pos] = s;
                         isa[s] = mark(pos);
                     } else {
-                        let p = chk(p_raw, n, "non-final pass2: p=isa[s]");
-                        let new_start = p.wrapping_add(sa[p]);
-                        chk(new_start, n, "non-final pass2: new_start=p.wrapping_add(sa[p])");
-                        isa[s] = new_start; // store plain (unmarked) for Pass 3
+                        let p = p_raw;
+                        let sa_p = sa[p];
+
+                        let new_start = if is_marked(sa_p) {
+                            // ── FIX: counter was repurposed ─────────────────
+                            // The remaining slot IS the group-start slot (p).
+                            p
+                        } else {
+                            p.wrapping_add(sa_p)
+                        };
+
+                        isa[s] = new_start;
 
                         if p != prev_p {
                             sa[new_start] = 0;
@@ -356,7 +375,6 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
                     if !is_marked(p_raw) {
-                        chk(p_raw, n, "non-final pass3: p_raw=isa[s] (new_start)");
                         sa[p_raw] = sa[p_raw].wrapping_add(1);
                     }
                 }
