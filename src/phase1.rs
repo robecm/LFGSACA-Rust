@@ -215,7 +215,7 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     if is_marked(p_raw) {
                         let pos = unmark(p_raw);
                         sa[pos] = mark(s);
-                        isa[s] = pos;
+                        isa[s] = mark(pos);
                     } else {
                         let p = p_raw;
                         let new_sa_p = sa[p].wrapping_sub(1);
@@ -223,7 +223,7 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
                         let pos = p.wrapping_add(new_sa_p);
                         sa[pos] = mark(s);
-                        isa[s] = if is_marked(sa[p]) { pos } else { mark(pos) };
+                        isa[s] = mark(pos);
                     }
                 }
             } else {
@@ -235,22 +235,32 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                         sa[p] = sa[p].wrapping_sub(1);
                     }
                 }
+                let mut prev_p = usize::MAX;
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
-                    let new_start = if is_marked(p_raw) {
-                        unmark(p_raw)
+
+                    if is_marked(p_raw) {
+                        let pos = unmark(p_raw);
+                        sa[pos] = s;
+                        isa[s] = mark(pos);
                     } else {
                         let p = p_raw;
-                        p.wrapping_add(sa[p])
-                    };
-                    isa[s] = new_start;
-                    sa[new_start] = 0;
+                        let new_start = p.wrapping_add(sa[p]);
+                        isa[s] = new_start;
+
+                        if p != prev_p {
+                            sa[new_start] = 0;
+                            prev_p = p;
+                        }
+                    }
                 }
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
-                    sa[p_raw] = sa[p_raw].wrapping_add(1);
+                    if !is_marked(p_raw) {
+                        sa[p_raw] = sa[p_raw].wrapping_add(1);
+                    }
                 }
             }
         }
