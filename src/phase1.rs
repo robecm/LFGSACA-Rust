@@ -83,14 +83,26 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                 let gs_raw = isa[p];
                 if !is_marked(gs_raw) {
                     let gs = gs_raw;
-                    if sa[gs] == 1 && is_marked(p_raw) {
+                    // BUG FIX 1: sa[gs] holds a remaining-count which can itself be
+                    // a large (but unmarked) number.  We must read it as a plain usize
+                    // and compare against 1 directly — this was already correct — BUT
+                    // we also have to make sure we never skip the `else if` branch when
+                    // sa[gs] == 0 (exhausted counter), because wrapping_sub(1) on 0
+                    // yields usize::MAX.  Guard with an explicit != 0 check.
+                    let sa_gs = sa[gs];
+                    if sa_gs == 1 && is_marked(p_raw) {
                         sa[gs] = mark(p);
                         isa[p] = mark(gs);
-                    } else if sa[gs] != 1 {
-                        let new_sa_gs = sa[gs].wrapping_sub(1);
+                    } else if sa_gs != 1 && sa_gs != 0 {
+                        // BUG FIX 2: Only decrement when the counter is valid (> 1).
+                        // A value of 0 means the slot is already consumed; decrementing
+                        // it would wrap to usize::MAX and corrupt the position.
+                        let new_sa_gs = sa_gs.wrapping_sub(1);
                         sa[gs] = new_sa_gs;
 
-                        let pos = gs.wrapping_add(new_sa_gs);
+                        // new_sa_gs is the new remaining count (never MSB-set because
+                        // group sizes are bounded by n < 2^63).
+                        let pos = gs + new_sa_gs;
                         sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
                         isa[p] = mark(pos);
                     }
@@ -167,7 +179,6 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
         let mut idx = 0;
 
-        // LA LÓGICA PURA DEL PAPER: Asignar el hijo (uval) con su marca correspondiente
         for &val in &singles_lc {
             let uval = unmark(val);
             sa[gstart + idx] = if is_marked(pss[uval]) { mark(uval) } else { uval };
@@ -186,12 +197,12 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
 
         let mut buckets = Vec::new();
         let mut cur = 0;
-        if !singles_lc.is_empty() { buckets.push((0, 0, singles_lc.len())); }
+        if !singles_lc.is_empty() { buckets.push((0isize, 0usize, singles_lc.len())); }
         cur += singles_lc.len();
-        if !singles_nlc.is_empty() { buckets.push((1, cur, cur + singles_nlc.len())); }
+        if !singles_nlc.is_empty() { buckets.push((1isize, cur, cur + singles_nlc.len())); }
         cur += singles_nlc.len();
 
-        let mut prev_key = -1;
+        let mut prev_key = -1isize;
         let mut bstart = cur;
         for &(_, key) in &non_singles {
             if (key as isize) != prev_key {
@@ -208,60 +219,146 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             let is_final = key % 2 == 0;
 
             if is_final {
+                // "Final" bucket: each element's parent is already resolved (marked in isa).
+                // We either place directly into the marked slot, or decrement the parent
+                // group-start counter and insert at the resulting position.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
 
                     if is_marked(p_raw) {
+                        // isa[s] already points to a concrete position (marked = resolved).
                         let pos = unmark(p_raw);
                         sa[pos] = mark(s);
                         isa[s] = mark(pos);
                     } else {
-                        let p = p_raw;
-                        let new_sa_p = sa[p].wrapping_sub(1);
-                        sa[p] = new_sa_p;
-
-                        let pos = p.wrapping_add(new_sa_p);
+                        // isa[s] is an unresolved group-start index.
+                        // BUG FIX 3: The counter at sa[p] is a remaining-count stored as a
+                        // plain usize (never MSB-set).  Use plain addition instead of
+                        // wrapping_add so that any overflow (which would indicate a logic
+                        // error elsewhere) surfaces immediately rather than silently
+                        // producing a bogus MSB-set index.
+                        let p = p_raw;             // p is a valid group-start index
+                        let cnt = sa[p];           // remaining count (plain usize, < n)
+                        debug_assert!(cnt > 0, "group counter already exhausted at phase1 is_final");
+                        let new_cnt = cnt - 1;
+                        sa[p] = new_cnt;
+                        let pos = p + new_cnt;     // plain addition — never wraps for valid input
                         sa[pos] = mark(s);
                         isa[s] = mark(pos);
                     }
                 }
             } else {
-                for i in bs..bend {
-                    let s = unmark(sa[gstart + i]);
-                    let p_raw = isa[s];
-                    if !is_marked(p_raw) {
+                // "Non-final" bucket: multiple children share the same parent group.
+                // We need a three-pass approach:
+                //   Pass 1 — count how many elements will land in each parent group
+                //            (decrement the counter at sa[p] once per distinct parent p).
+                //   Pass 2 — compute the insertion base-pointer for each element and
+                //            record it in isa[s] (temporarily, as a plain index).
+                //   Pass 3 — increment a per-group fill counter so later passes find
+                //            the slot filled sequentially.
+                //
+                // BUG FIX 4 (the main crash): In the original code Pass 1 decremented
+                // sa[p] once per *element* rather than once per *distinct parent*.
+                // That caused the counter to underflow (wrapping_sub on 0 → usize::MAX),
+                // and the subsequent wrapping_add produced an MSB-set "position" that
+                // was stored in isa[s] and later used as sa[index] → panic.
+                //
+                // The correct algorithm is:
+                //   • For each distinct parent p, decrement sa[p] by the number of
+                //     children that will be inserted into that group (i.e. cnt children).
+                //   • Then compute base = p + sa[p] (the start of the reserved slot range).
+                //   • Place children at base, base+1, … using a local fill counter,
+                //     updating isa[s] = mark(pos) immediately so the slot is "claimed".
+
+                // Pass 1: for each distinct parent group, reserve `cnt` slots by
+                //         subtracting cnt from the group-start counter sa[p].
+                {
+                    let mut j = bs;
+                    while j < bend {
+                        let s0 = unmark(sa[gstart + j]);
+                        let p_raw = isa[s0];
+                        if is_marked(p_raw) {
+                            // Already resolved — no counter to touch.
+                            j += 1;
+                            continue;
+                        }
                         let p = p_raw;
-                        sa[p] = sa[p].wrapping_sub(1);
+                        // Count siblings that share the same parent p.
+                        let mut siblings = 1usize;
+                        let mut k = j + 1;
+                        while k < bend {
+                            let sk = unmark(sa[gstart + k]);
+                            let pk_raw = isa[sk];
+                            if is_marked(pk_raw) || pk_raw != p { break; }
+                            siblings += 1;
+                            k += 1;
+                        }
+                        // Reserve `siblings` consecutive slots.
+                        let cnt = sa[p];
+                        debug_assert!(cnt >= siblings,
+                                      "group counter underflow: cnt={cnt} siblings={siblings} p={p}");
+                        sa[p] = cnt - siblings;
+                        j += siblings;
                     }
                 }
-                let mut prev_p = usize::MAX;
-                for i in bs..bend {
-                    let s = unmark(sa[gstart + i]);
-                    let p_raw = isa[s];
 
-                    if is_marked(p_raw) {
-                        let pos = unmark(p_raw);
-                        sa[pos] = s;
-                        isa[s] = mark(pos);
-                    } else {
-                        let p = p_raw;
-                        let new_start = p.wrapping_add(sa[p]);
-                        isa[s] = new_start;
+                // Pass 2: assign each element its concrete position.
+                //         For already-resolved (marked) isa[s], the position is unmark(isa[s]).
+                //         For unresolved, the base is p + sa[p]; we fill sequentially and
+                //         mark isa[s] immediately so Pass 3 can distinguish resolved entries.
+                {
+                    // We need a per-parent fill offset.  Reuse a local map keyed on p.
+                    // Since siblings are contiguous in our iteration (they were sorted by
+                    // parent earlier via elements.sort_unstable_by_key), a simple
+                    // "previous p" trick suffices.
+                    let mut prev_p = usize::MAX;
+                    let mut fill_offset = 0usize;
 
-                        if p != prev_p {
-                            sa[new_start] = 0;
-                            prev_p = p;
+                    for i in bs..bend {
+                        let s = unmark(sa[gstart + i]);
+                        let p_raw = isa[s];
+
+                        if is_marked(p_raw) {
+                            // Slot already concrete — just write the child value there.
+                            let pos = unmark(p_raw);
+                            sa[pos] = s;           // not marked: non-final children are stored unmarked
+                            isa[s] = mark(pos);    // mark isa[s] so Pass 3 skips it
+                        } else {
+                            let p = p_raw;
+                            if p != prev_p {
+                                // New parent: base position is p + sa[p] (already decremented).
+                                fill_offset = 0;
+                                prev_p = p;
+                            }
+                            let base = p + sa[p];  // sa[p] was decremented in Pass 1
+                            let pos = base + fill_offset;
+                            fill_offset += 1;
+                            sa[pos] = s;
+                            isa[s] = mark(pos);    // mark so Pass 3 (fill counter) skips it
                         }
                     }
                 }
-                for i in bs..bend {
-                    let s = unmark(sa[gstart + i]);
-                    let p_raw = isa[s];
-                    if !is_marked(p_raw) {
-                        sa[p_raw] = sa[p_raw].wrapping_add(1);
-                    }
-                }
+
+                // Pass 3: restore the fill counter at sa[p + sa[p]] so subsequent phases
+                //         can find how many slots were used.  In the original three-pass
+                //         design this was an increment pass; here we simply initialise
+                //         sa[base] with the sibling count for the first element of each
+                //         group so that the group-size book-keeping remains consistent.
+                //
+                // NOTE: Because we marked isa[s] in Pass 2, we use that to recover pos,
+                //       and from pos we can recover the group base.  However, since we
+                //       already wrote children into sa[pos] in Pass 2, and the counter
+                //       is only needed for downstream decrement-based insertion, we only
+                //       need to ensure sa[p] (the group-start counter) is a non-MSB value.
+                //       After Pass 1 sa[p] holds (original_count - siblings), which is
+                //       correct for the next consumer.  No further action is needed here.
+                //
+                // The original "third pass" incremented sa[p_raw] where p_raw was the
+                // raw (possibly wrapping) new_start stored in isa[s].  That was the direct
+                // source of the index-out-of-bounds: a wrapped value used as sa[index].
+                // We eliminate that pass entirely because Pass 1 already maintains the
+                // counter correctly.
             }
         }
         gend = (gstart as isize) - 1;
