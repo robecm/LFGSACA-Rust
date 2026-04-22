@@ -27,7 +27,6 @@ pub fn write_group_sizes(sa: &mut [usize], c: &[usize], sigma: usize) {
 pub fn insert_leaves(s: &[u8], n: usize, sa: &mut [usize], isa: &mut [usize], c: &[usize]) {
     let mut c1 = s[n - 1];
     let mut t = 0;
-
     for i in (0..n).rev() {
         let c0 = s[i];
         if i < n - 1 {
@@ -36,9 +35,7 @@ pub fn insert_leaves(s: &[u8], n: usize, sa: &mut [usize], isa: &mut [usize], c:
         c1 = c0;
         let cc = (c0 as usize) * 2 + t as usize;
         let gstart = c[cc];
-
         isa[i] = gstart;
-
         if t == 0 {
             sa[gstart] = sa[gstart].wrapping_sub(1);
             let pos = gstart.wrapping_add(sa[gstart]);
@@ -47,82 +44,35 @@ pub fn insert_leaves(s: &[u8], n: usize, sa: &mut [usize], isa: &mut [usize], c:
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// The core invariant of Phase I's counter scheme
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// For a group starting at index `gs`:
-//   • sa[gs] starts as `group_size` (written by write_group_sizes).
-//   • insert_leaves decrements it for each L-type leaf, filling right-to-left:
-//       sa[gs] -= 1;  sa[gs + sa[gs]] = mark(leaf);
-//     After all leaves, sa[gs] = number of S-type slots remaining (≥ 0).
-//   • Phase I then inserts internal nodes into those S-type slots the same way:
-//       sa[gs] -= 1;  sa[gs + sa[gs]] = child;  isa[child] = mark(gs + sa[gs]);
-//
-// SPECIAL CASE (singleton path, original line 86-88):
-//   When sa[gs] == 1 and p is the last child, the code transitions the
-//   group-start slot to store `mark(p)` directly instead of a counter:
-//       sa[gs] = mark(p);  isa[p] = mark(gs);
-//
-//   This works for that one element — but it DESTROYS the counter. If any
-//   other suffix also has isa[·] = gs (i.e., shares the same parent group),
-//   it will later read sa[gs] = mark(p) thinking it's a decrement counter,
-//   call wrapping_sub(1) on a marked value, and produce an MSB-set position.
-//
-// ROOT CAUSE
-// ──────────
-// Multiple S-type suffixes in the same character-group all get isa[·] = gs
-// in insert_leaves. When the first one transitions sa[gs] to mark(p), every
-// subsequent one that reads sa[gs] as a counter gets a marked (huge) value.
-//
-// THE FIX
-// ───────
-// Before using sa[gs] as a counter in any decrement path, check whether it
-// has already been marked (i.e., the group-start slot has been repurposed as
-// a concrete pointer). If so, isa[p] is already fully resolved — read the
-// position from sa[gs] directly and record it in isa[p]. No decrement needed.
-//
-// This helper encapsulates that decision for the singleton path.
-// For the bucket paths the same logic is inlined with clear comments.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Inserts suffix `p` into its parent group `gs`.
-/// `p_raw` is `pss[s]` (carries the last-child mark via MSB).
-/// `gs` is `isa[p]` (the group-start index, guaranteed unmasked by caller).
-/// `sa` / `isa` / `n` are the live algorithm arrays.
+// ---------------------------------------------------------------------------
+// insert_into_group — handles all cases of the group-start counter
+// ---------------------------------------------------------------------------
+// sa[gs] lifecycle:
+//   write_group_sizes  → sa[gs] = group_size  (plain)
+//   insert_leaves      → decrements for each L-type leaf; sa[gs] = #S-slots left
+//   singleton path     → when sa[gs]==1 and p is last child: sa[gs] = mark(p)
+//                        *** counter slot is now a POINTER — must guard against this ***
 #[inline(always)]
-fn insert_into_group(
-    p: usize,
-    p_raw: usize,
-    gs: usize,
-    sa: &mut [usize],
-    isa: &mut [usize],
-) {
+fn insert_into_group(p: usize, p_raw: usize, gs: usize, sa: &mut [usize], isa: &mut [usize]) {
     let sa_gs = sa[gs];
-
     if is_marked(sa_gs) {
-        // The group-start slot was already repurposed as a concrete pointer
-        // by a previous singleton insertion (the sa[gs]=mark(p) path).
-        // The position it encodes is gs itself (the only slot left was slot 0).
-        // Just write p there and mark isa[p].
-        let pos = gs; // the sole remaining slot is the group-start itself
-        sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
-        isa[p] = mark(pos);
+        // Counter was repurposed as a pointer by a prior last-child insertion.
+        // The only remaining slot is the group-start slot itself (gs).
+        sa[gs] = if is_marked(p_raw) { mark(p) } else { p };
+        isa[p] = mark(gs);
     } else if sa_gs == 1 && is_marked(p_raw) {
-        // Last slot AND p is the last child: transition group-start to pointer.
+        // Last slot AND last child: transition group-start slot to pointer.
         sa[gs] = mark(p);
         isa[p] = mark(gs);
     } else if sa_gs >= 1 {
-        // Normal fill: decrement counter, place p in the next slot from right.
-        let new_cnt = sa_gs - 1; // plain subtraction, safe because sa_gs >= 1
+        let new_cnt = sa_gs - 1;
         sa[gs] = new_cnt;
         let pos = gs + new_cnt;
         sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
         isa[p] = mark(pos);
     }
-    // sa_gs == 0: no room — this can occur if the group is all L-type and
-    // every slot was consumed by insert_leaves. An S-type child pointing here
-    // would be a PSS-tree inconsistency; silently skip so we don't corrupt.
+    // sa_gs == 0: all L-type; no S-type slot available.  isa[p] left as raw
+    // gstart; the resolution loop at phase1's end will remap it via sa[gstart].
 }
 
 pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> Vec<usize> {
@@ -140,18 +90,11 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
         }
 
         let sv = sa[gend as usize];
-        if !is_marked(sv) {
-            gend -= 1;
-            continue;
-        }
+        if !is_marked(sv) { gend -= 1; continue; }
 
         let s_val = unmark(sv);
         let gstart_raw = isa[s_val];
-
-        if is_marked(gstart_raw) {
-            gend -= 1;
-            continue;
-        }
+        if is_marked(gstart_raw) { gend -= 1; continue; }
 
         let gstart = gstart_raw;
         let mut num = (gend as usize) + 1 - gstart;
@@ -164,11 +107,8 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             if p < n {
                 let gs_raw = isa[p];
                 if !is_marked(gs_raw) {
-                    // gs_raw is the parent group-start. Use the shared helper
-                    // which handles the marked-counter case correctly.
                     insert_into_group(p, p_raw, gs_raw, sa, isa);
                 } else {
-                    // isa[p] already points to a concrete position.
                     let pos = unmark(gs_raw);
                     sa[pos] = if is_marked(p_raw) { mark(p) } else { p };
                     isa[p] = mark(pos);
@@ -181,15 +121,12 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
         // ── Multi-element group ──────────────────────────────────────────────
         gstarts.push(gstart);
         let mut num_factors = 0;
-
         while num_factors < num {
             let item = unmark(sa[gstart + num_factors]);
             if unmark(pss[item]) == n {
                 isa[item] = mark(gstart + num - 1 - num_factors);
                 num_factors += 1;
-            } else {
-                break;
-            }
+            } else { break; }
         }
 
         if num_factors > 0 {
@@ -200,10 +137,7 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             }
             num -= num_factors;
             gend -= num_factors as isize;
-            if num == 0 {
-                gend = (gstart as isize) - 1;
-                continue;
-            }
+            if num == 0 { gend = (gstart as isize) - 1; continue; }
         } else {
             for i in 0..num {
                 let item = unmark(sa[gstart + i]);
@@ -282,35 +216,21 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
             let is_final = key % 2 == 0;
 
             if is_final {
-                // ── is_final bucket ──────────────────────────────────────────
-                // Each child s is the last child of its parent group (or the
-                // sole child). Decrement sa[p] and place s in the resulting slot.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
-
                     if is_marked(p_raw) {
-                        // Parent already has a concrete position.
                         let pos = unmark(p_raw);
                         sa[pos] = mark(s);
                         isa[s] = mark(pos);
                     } else {
-                        // p_raw is the parent group-start index.
                         let p = p_raw;
                         let sa_p = sa[p];
-
                         if is_marked(sa_p) {
-                            // ── FIX: sa[p] was repurposed as a pointer ───────
-                            // The group-start slot no longer holds a counter.
-                            // The only remaining slot is p itself (slot 0).
-                            let pos = p;
-                            sa[pos] = mark(s);
-                            isa[s] = mark(pos);
+                            // Counter slot repurposed — only slot is p itself.
+                            sa[p] = mark(s);
+                            isa[s] = mark(p);
                         } else {
-                            // Normal path: sa_p is a plain counter.
-                            // Use plain subtraction — sa_p must be ≥ 1 here
-                            // because is_final children are inserted last and
-                            // the PSS-tree guarantees at least one slot exists.
                             let new_sa_p = sa_p.wrapping_sub(1);
                             sa[p] = new_sa_p;
                             let pos = p.wrapping_add(new_sa_p);
@@ -320,69 +240,70 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     }
                 }
             } else {
-                // ── non-final bucket: three-pass insertion ───────────────────
+                // ── Non-final bucket: three-pass insertion ───────────────────
                 //
-                // Pass 1 — decrement sa[p] once per non-final child.
+                // Pass 1 — decrement sa[p] once per unresolved child to
+                //           reserve contiguous slots in the parent group.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
                     if !is_marked(p_raw) {
                         let p = p_raw;
-                        let sa_p = sa[p];
-                        // Only decrement if the slot is still a plain counter.
-                        // If it's already marked (repurposed pointer), there is
-                        // exactly one slot left (slot p itself) and no counter
-                        // arithmetic is needed or valid.
-                        if !is_marked(sa_p) {
-                            sa[p] = sa_p.wrapping_sub(1);
+                        if !is_marked(sa[p]) {
+                            sa[p] = sa[p].wrapping_sub(1);
                         }
                     }
                 }
 
-                // Pass 2 — compute base address; write children.
+                // Pass 2 — assign each child a concrete slot and mark isa[s].
+                //
+                // KEY FIX: the original code stored `new_start` (plain/unmarked)
+                // in isa[s] here, then used Pass 3 to increment a fill counter.
+                // But leaving isa[s] unmarked means the final resolution loop
+                // treats it as a raw group-start and remaps it via sa[new_start],
+                // which holds a suffix index rather than a group index → panic in
+                // phase2.  Instead, we maintain a per-group fill offset via
+                // sa[new_start] (as before), write the child directly into its
+                // slot, and mark isa[s] immediately so it is never misread.
                 let mut prev_p = usize::MAX;
+                let mut base = 0usize;
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
 
                     if is_marked(p_raw) {
                         let pos = unmark(p_raw);
-                        sa[pos] = s;
+                        sa[pos] = s;          // non-final children are not marked in SA
                         isa[s] = mark(pos);
                     } else {
                         let p = p_raw;
                         let sa_p = sa[p];
 
-                        let new_start = if is_marked(sa_p) {
-                            // ── FIX: counter was repurposed ─────────────────
-                            // The remaining slot IS the group-start slot (p).
-                            p
-                        } else {
-                            p.wrapping_add(sa_p)
-                        };
-
-                        isa[s] = new_start;
-
                         if p != prev_p {
-                            sa[new_start] = 0;
+                            // First child for this parent: compute the base of
+                            // the reserved block and initialise the fill counter.
+                            base = if is_marked(sa_p) { p } else { p.wrapping_add(sa_p) };
+                            sa[base] = 0;
                             prev_p = p;
                         }
-                    }
-                }
 
-                // Pass 3 — fill counter: increment sa[new_start] per child.
-                for i in bs..bend {
-                    let s = unmark(sa[gstart + i]);
-                    let p_raw = isa[s];
-                    if !is_marked(p_raw) {
-                        sa[p_raw] = sa[p_raw].wrapping_add(1);
+                        // Read fill offset, place child, advance counter.
+                        let offset = sa[base];
+                        let pos = base + offset;
+                        sa[base] = offset + 1;
+
+                        sa[pos] = s;          // non-final: plain (not marked in SA)
+                        isa[s] = mark(pos);   // MARKED immediately — resolution-loop safe
                     }
                 }
+                // Pass 3 (fill-counter increment) is now merged into Pass 2.
+                // No third pass needed.
             }
         }
         gend = (gstart as isize) - 1;
     }
 
+    // Resolve isa: entries still unmarked hold a raw gstart; remap to group index.
     for (i, &gs) in gstarts.iter().enumerate() {
         sa[gs] = i;
     }
