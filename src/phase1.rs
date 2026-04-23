@@ -199,7 +199,6 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     if is_marked(pss[item]) { mark(item) } else { item };
             }
             num -= num_factors;
-            gend -= num_factors as isize;
             if num == 0 {
                 gend = (gstart as isize) - 1;
                 continue;
@@ -339,7 +338,7 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     }
                 }
 
-                // Pass 2 — compute base address; write children.
+                // Pass 2 — compute base address and initialise fill counter.
                 let mut prev_p = usize::MAX;
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
@@ -352,17 +351,8 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     } else {
                         let p = p_raw;
                         let sa_p = sa[p];
-
-                        let new_start = if is_marked(sa_p) {
-                            // ── FIX: counter was repurposed ─────────────────
-                            // The remaining slot IS the group-start slot (p).
-                            p
-                        } else {
-                            p.wrapping_add(sa_p)
-                        };
-
-                        isa[s] = new_start;
-
+                        let new_start = if is_marked(sa_p) { p } else { p.wrapping_add(sa_p) };
+                        isa[s] = new_start; // still unmarked; Pass 3 will mark it
                         if p != prev_p {
                             sa[new_start] = 0;
                             prev_p = p;
@@ -370,20 +360,23 @@ pub fn phase1(sa: &mut [usize], pss: &[usize], isa: &mut [usize], n: usize) -> V
                     }
                 }
 
-                // Pass 3 — fill counter: assign each child its concrete slot
-                // and immediately mark isa[s] so the resolution loop at the
-                // end of phase1 never treats it as a raw group-start pointer.
+                // Pass 3 — assign concrete slot, write child, mark isa[s].
+                // new_start (stored unmarked in isa[s]) is the base of the
+                // reserved block.  sa[new_start] is the running fill offset.
+                // We compute pos = new_start + offset, place the child there,
+                // advance the offset, then mark isa[s] = mark(pos) so the
+                // resolution loop at the end of phase1 never treats it as a
+                // raw group-start pointer.
                 for i in bs..bend {
                     let s = unmark(sa[gstart + i]);
                     let p_raw = isa[s];
                     if !is_marked(p_raw) {
-                        // p_raw == new_start (the base of this group's reserved block).
                         let new_start = p_raw;
                         let offset = sa[new_start];
                         let pos = new_start + offset;
                         sa[new_start] = offset + 1;
-                        sa[pos] = s;            // place child (non-final → not marked in SA)
-                        isa[s] = mark(pos);     // mark so resolution loop skips this entry
+                        sa[pos] = s;
+                        isa[s] = mark(pos);
                     }
                 }
             }

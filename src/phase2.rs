@@ -26,7 +26,7 @@ pub fn phase2_circular(sa: &mut [usize], mut gstarts: Vec<usize>, isa_prev: &[us
 }
 
 fn walk(sa: &mut [usize], gstarts: &mut [usize], isa_prev: &[usize], n: usize) {
-    let mut walk_logic = |mut curr: usize, sa_ref: &mut [usize], gs: &mut [usize]| {
+    let walk_logic = |mut curr: usize, sa_ref: &mut [usize], gs: &mut [usize]| {
         loop {
             let isa = isa_prev[2 * curr];
             if is_marked(isa) { break; }
